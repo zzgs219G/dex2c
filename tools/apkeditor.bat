@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set BASENAME=apktool_
+set BASENAME=apkeditor_
 chcp 65001 2>nul >nul
 
 set java_exe=java.exe
@@ -12,8 +12,8 @@ set "java_exe=%JAVA_HOME%\bin\java.exe"
 rem Find the highest version .jar available in the same directory as the script
 setlocal EnableDelayedExpansion
 pushd "%~dp0"
-if exist apktool.jar (
-    set BASENAME=apktool
+if exist apkeditor.jar (
+    set BASENAME=apkeditor
     goto skipversioned
 )
 set max=0
