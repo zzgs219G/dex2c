@@ -13,7 +13,12 @@
     return-void
 .end method
 
-.method public native constructor <init>()V
+.method public constructor <init>()V
+    .registers 1
+
+    invoke-direct {p0}, Landroid/app/Application;-><init>()V
+
+    return-void
 .end method
 
 .method public static final native init()V

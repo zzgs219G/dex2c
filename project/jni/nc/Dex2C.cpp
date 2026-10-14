@@ -265,15 +265,6 @@ JNIEXPORT void JNICALL
 Java_amimo_dcc_DccApplication_init__(JNIEnv *env, jobject thiz) {
 
 }
-
-JNIEXPORT void JNICALL
-Java_amimo_dcc_DccApplication__0003cinit_0003e__(JNIEnv *env, jobject thiz) {
-    auto instance = (jobject) env->NewLocalRef(thiz);
-    jclass application = env->FindClass("android/app/Application");
-    jmethodID init = env->GetMethodID(application, "<init>", "()V");
-
-    env->CallVoidMethodA(instance, init, {});
-}
 }
 
 JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {

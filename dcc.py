@@ -451,8 +451,8 @@ class MethodFilter(object):
             return False
 
         # Skip public constructor
-        # if name == "<init>":
-            # return False
+        if name == "<init>":
+            return False
 
         # Android VM may find the wrong method using short jni name
         # don't compile function if there is a same named native method
