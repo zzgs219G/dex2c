@@ -34,10 +34,18 @@ tools_dir = os.path.join(current_dir, "tools")
 
 APKEDITOR = os.path.join(tools_dir, "apkeditor.jar")
 APKEDITOR2 = os.path.join(tools_dir, "apkeditor.bat")
-APKEDITOR3 = os.path.join(tools_dir, "apkeditor")
 SIGNJAR = os.path.join(tools_dir, "apksigner.jar")
 MANIFEST_EDITOR = os.path.join(tools_dir, "manifest-editor.jar")
 NDKBUILD = "ndk-build"
+
+# JVM flags used when apkeditor.jar is invoked directly (Linux/Termux).
+# Mirrors the flags of tools/apkeditor so behavior matches the old wrapper.
+APKEDITOR_JAVA_OPTS = [
+    "-Xmx1024M",
+    "-Dfile.encoding=utf-8",
+    "-Djdk.util.zip.disableZip64ExtraFieldValidation=true",
+    "-Djdk.nio.zipfs.allowDotZipEntry=true",
+]
 
 SKIP_SYNTHETIC_METHODS = False
 IGNORE_APP_LIB_ABIS = False
@@ -46,6 +54,26 @@ Logger = getLogger("dcc")
 
 def is_windows():
     return os.name == "nt"
+
+
+def is_termux():
+    # Termux reports os.name == "posix" like a normal Linux system; the
+    # reliable signals are the $PREFIX path and TERMUX_VERSION set by the app.
+    prefix = os.environ.get("PREFIX", "")
+    return "com.termux" in prefix or "TERMUX_VERSION" in os.environ
+
+
+def normalize_path(p):
+    """Unify path separators for values read from dcc.cfg.
+
+    dcc.cfg may carry Windows separators (e.g. "tools\\apkeditor.jar"). POSIX
+    treats "\\" as a regular character, which makes path.exists() fail and
+    breaks subprocess calls on Linux/Termux. Windows accepts "/" natively,
+    so converting to the platform separator is safe on every platform.
+    """
+    if not p:
+        return p
+    return os.path.normpath(p.replace("\\", os.sep).replace("/", os.sep))
 
 
 def cpu_count():
@@ -103,7 +131,12 @@ def clean_tmp_directory():
         Logger.info("Removing .tmp folder")
         rmtree(tmpdir)
     except OSError:
-        run(["rd", "/s", "/q", tmpdir], shell=True)
+        # "rd" is a Windows builtin; on Linux/Termux just warn instead of
+        # spawning a doomed shell call.
+        if is_windows():
+            run(["rd", "/s", "/q", tmpdir], shell=True)
+        else:
+            Logger.warning("Failed to remove .tmp folder")
 
 
 class ApkEditor(object):
@@ -111,30 +144,39 @@ class ApkEditor(object):
     with open("dcc.cfg") as fp:
         dcc_cfg = json.load(fp)
 
-    APKEDITOR = dcc_cfg["apkeditor"]
+    # dcc.cfg paths may use Windows separators; normalize before any
+    # existence check or invocation, and fall back to the bundled jar
+    # when the configured path does not exist on this machine.
+    cfg_apkeditor = normalize_path(dcc_cfg["apkeditor"])
+    APKEDITOR = cfg_apkeditor if path.exists(cfg_apkeditor) else APKEDITOR
+
+    @staticmethod
+    def command(*args):
+        """Build the apkeditor command line for the current platform.
+
+        Windows keeps the bundled .bat wrapper (unchanged behavior). On
+        Linux and Termux the jar is invoked directly: the bundled bash
+        wrapper depends on /bin utilities that do not exist on Termux.
+        """
+        if is_windows():
+            return [APKEDITOR2, *args]
+        if is_termux():
+            return ["java", *APKEDITOR_JAVA_OPTS, "-jar", ApkEditor.APKEDITOR, *args]
+        return ["java", *APKEDITOR_JAVA_OPTS, "-jar", ApkEditor.APKEDITOR, *args]
 
     @staticmethod
     def decompile(apk):
         outdir = make_temp_dir("dcc-apkeditor-")
-        if is_windows():
-            check_call([APKEDITOR2, "d", "-f", "-t", "raw", "-i", apk, "-o", outdir])
-        else:
-            check_call(["bash", APKEDITOR3, "d", "-f", "-t", "raw", "-i", apk, "-o", outdir])
+        check_call(ApkEditor.command("d", "-f", "-t", "raw", "-i", apk, "-o", outdir))
         return outdir
 
     @staticmethod
     def compile(decompiled_dir):
         unsigned_apk = make_temp_file("-unsigned.apk")
-        if is_windows():
-            check_call(
-                [APKEDITOR2, "b", "-f", "-i", decompiled_dir, "-o", unsigned_apk],
-                stderr=STDOUT,
-            )
-        else:
-            check_call(
-                ["bash", APKEDITOR3, "b", "-f", "-i", decompiled_dir, "-o", unsigned_apk],
-                stderr=STDOUT,
-            )
+        check_call(
+            ApkEditor.command("b", "-f", "-i", decompiled_dir, "-o", unsigned_apk),
+            stderr=STDOUT,
+        )
         return unsigned_apk
 
 
@@ -201,7 +243,10 @@ def sign(unsigned_apk, signed_apk):
     with open("dcc.cfg") as fp:
         dcc_cfg = json.load(fp)
         signature = dcc_cfg["signature"]
-        keystore = signature["keystore_path"]
+        # Normalize separators before the existence check: a backslash path
+        # from dcc.cfg fails path.exists() on Linux/Termux and would make
+        # signing silently fall back to the unsigned apk.
+        keystore = normalize_path(signature["keystore_path"])
 
     if (
         signature["v1_enabled"] is False
@@ -1159,8 +1204,8 @@ if __name__ == "__main__":
     with open("dcc.cfg") as fp:
         dcc_cfg = json.load(fp)
 
-    if "ndk_dir" in dcc_cfg and path.exists(dcc_cfg["ndk_dir"]):
-        ndk_dir = dcc_cfg["ndk_dir"]
+    ndk_dir = normalize_path(dcc_cfg["ndk_dir"]) if "ndk_dir" in dcc_cfg else ""
+    if ndk_dir and path.exists(ndk_dir):
         if is_windows():
             NDKBUILD = path.join(ndk_dir, "ndk-build.cmd")
         else:
@@ -1170,14 +1215,23 @@ if __name__ == "__main__":
         if not path.exists(NDKBUILD):
             raise Exception("Invalid ndk_dir path, file not found at " + NDKBUILD)
 
-    if "apkeditor" in dcc_cfg and path.exists(dcc_cfg["apkeditor"]):
-        APKEDITOR = dcc_cfg["apkeditor"]
+    if "apkeditor" in dcc_cfg:
+        cfg_apkeditor = normalize_path(dcc_cfg["apkeditor"])
+        if path.exists(cfg_apkeditor):
+            APKEDITOR = cfg_apkeditor
 
     if "ollvm" in dcc_cfg and dcc_cfg["ollvm"]["enable"]:
         enable_ollvm = True
         ollvm_flags = dcc_cfg["ollvm"]["flags"]
 
     show_logging(level=INFO)
+
+    if is_windows():
+        Logger.info("Running on Windows")
+    elif is_termux():
+        Logger.info("Running on Termux (android)")
+    else:
+        Logger.info("Running on Linux")
 
     # n
     # Must be invoked first before invoking any other method

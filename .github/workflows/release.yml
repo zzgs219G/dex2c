@@ -1,0 +1,74 @@
+name: Create release
+
+on:
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install dependencies
+      run: pip3 install -r requirements.txt
+
+    # Smoke test: the full import chain (dcc.py -> vendored androguard ->
+    # dex2c) plus dcc.cfg parsing run at import time, so --help is enough
+    # to prove the package is usable before shipping it.
+    - name: Smoke test
+      run: |
+        python3 -m compileall -q dcc.py dex2c
+        python3 dcc.py --help
+
+    - name: Get latest tag name
+      id: get_latest_tag_name
+      run: echo "VERSION=${GITHUB_REF/refs\/tags\//}" >> "$GITHUB_OUTPUT"
+
+    # dcc.cfg ships as-is: dcc.py normalizes path separators at runtime
+    # (Windows / Linux / Termux), so the same zip works everywhere.
+    - name: Stage release files
+      run: |
+        mkdir -p staging/Dex2C
+        rsync -a \
+          --exclude='.git' \
+          --exclude='.github' \
+          --exclude='.tmp' \
+          --exclude='staging' \
+          --exclude='__pycache__' \
+          --exclude='*.pyc' \
+          ./ staging/Dex2C/
+        echo "${{ steps.get_latest_tag_name.outputs.VERSION }}" > staging/Dex2C/VERSION
+
+    - name: Compress files
+      working-directory: staging
+      run: zip -r -q ../Dex2C-${{ steps.get_latest_tag_name.outputs.VERSION }}.zip Dex2C
+
+    # Fail the release loudly if anything essential is missing from the zip
+    # instead of shipping a package other pipelines cannot run.
+    - name: Verify zip contents
+      run: |
+        ZIP="Dex2C-${{ steps.get_latest_tag_name.outputs.VERSION }}.zip"
+        for f in dcc.py dcc.cfg filter.txt requirements.txt VERSION \
+                 tools/apkeditor.jar tools/apksigner.jar tools/manifest-editor.jar \
+                 keystore/debug.keystore project/jni/Android.mk \
+                 loader/DccApplication.smali; do
+          unzip -l "$ZIP" | grep -q "Dex2C/$f" || { echo "Missing in zip: $f"; exit 1; }
+        done
+        echo "All essential files present."
+
+    - uses: "marvinpinto/action-automatic-releases@latest"
+      with:
+        repo_token: "${{ secrets.GITHUB_TOKEN }}"
+        prerelease: false
+        files: Dex2C-${{ steps.get_latest_tag_name.outputs.VERSION }}.zip
