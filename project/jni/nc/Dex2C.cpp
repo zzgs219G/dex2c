@@ -274,11 +274,11 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, void *reserved) {
         return JNI_ERR;
     }
 
-    jclass clz = env->FindClass("amimo/dcc/DccApplication");
-
-    if (!clz)
-        exit(1);
-
+    // Note: deliberately NO "is the loader class present" check here. The
+    // so may be loaded by ANY class — pipeline consumers insert
+    // System.loadLibrary into the classes that own the extracted methods,
+    // and those apps never contain amimo.dcc.DccApplication. A FindClass +
+    // exit(1) here would kill every such app at startup.
     cache_well_known_classes(env);
     const char *result = dynamic_register_compile_methods(env);
     if (result != nullptr)

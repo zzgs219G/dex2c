@@ -26,7 +26,7 @@ from dex2c.util import (
 from subprocess import check_call, PIPE, STDOUT, run, CalledProcessError
 from random import choice
 from string import ascii_letters, digits
-from shutil import copy, move, make_archive, rmtree, copytree
+from shutil import copy, move, make_archive, rmtree, copytree, which
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +37,7 @@ APKEDITOR2 = os.path.join(tools_dir, "apkeditor.bat")
 SIGNJAR = os.path.join(tools_dir, "apksigner.jar")
 MANIFEST_EDITOR = os.path.join(tools_dir, "manifest-editor.jar")
 NDKBUILD = "ndk-build"
+BUNDLED_ZIPALIGN = os.path.join(tools_dir, "zipalign")
 
 # JVM flags used when apkeditor.jar is invoked directly (Linux/Termux).
 # Mirrors the flags of tools/apkeditor so behavior matches the old wrapper.
@@ -207,9 +208,30 @@ def change_max_sdk(command=list(), max_sdk="33", update_existing=True):
 
 
 # n
+def find_zipalign():
+    """Locate zipalign: PATH first, then the bundled aarch64 static build.
+
+    The bundled tools/zipalign (from lzhiyong/android-sdk-tools, AOSP
+    Apache-2.0) makes standalone use work out of the box on Termux. It is
+    an aarch64 ELF, so only fall back to it on aarch64 hosts — otherwise
+    x86_64 hosts would fail with "Exec format error" instead of a clear
+    "zipalign not found".
+    """
+    path = which("zipalign")
+    if path:
+        return path
+    if (
+        not is_windows()
+        and os.uname().machine == "aarch64"
+        and os.access(BUNDLED_ZIPALIGN, os.X_OK)
+    ):
+        return BUNDLED_ZIPALIGN
+    return "zipalign"
+
+
 def zipalign(input_apk, output_apk):
     Logger.info(f"Zipaligning {input_apk} -> {output_apk}")
-    command = ["zipalign"]
+    command = [find_zipalign()]
 
     def _new_zipalign():
         try:
@@ -943,16 +965,27 @@ def dcc_main(
 
     write_compiled_methods(project_dir, compiled_methods)
 
+    # DynamicRegister.cpp must be generated in BOTH modes: Dex2C.cpp's
+    # JNI_OnLoad unconditionally calls dynamic_register_compile_methods(),
+    # so any consumer that links jni/nc needs the definition to exist —
+    # the real register table with --dynamic-register, the dummy stub
+    # without it. Generating it only under do_compile shipped --no-build
+    # project archives that fail to link (undefined symbol).
+    if dynamic_register:
+        write_dynamic_register(project_dir, compiled_methods, method_prototypes)
+    else:
+        write_dummy_dynamic_register(project_dir)
+
     if not do_compile:
+        # --no-build = transpile + archive, nothing else. Return before the
+        # full APK path: it would re-pack an APK whose methods are stubbed
+        # native while the .so was never built (a broken artifact nobody
+        # asked for), and call zipalign which may be absent.
         src_zip = archive_compiled_code(project_dir)
         move(src_zip, source_archive)
+        return
 
-    if do_compile:
-        if dynamic_register:
-            write_dynamic_register(project_dir, compiled_methods, method_prototypes)
-        else:
-            write_dummy_dynamic_register(project_dir)
-        build_project(project_dir)
+    build_project(project_dir)
 
     if is_apk(apkfile) and outapk:
         decompiled_dir = ApkEditor.decompile(apkfile)

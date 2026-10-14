@@ -61,6 +61,7 @@ jobs:
         ZIP="Dex2C-${{ steps.get_latest_tag_name.outputs.VERSION }}.zip"
         for f in dcc.py dcc.cfg filter.txt requirements.txt VERSION \
                  tools/apkeditor.jar tools/apksigner.jar tools/manifest-editor.jar \
+                 tools/zipalign \
                  keystore/debug.keystore project/jni/Android.mk \
                  loader/DccApplication.smali; do
           unzip -l "$ZIP" | grep -q "Dex2C/$f" || { echo "Missing in zip: $f"; exit 1; }

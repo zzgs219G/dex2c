@@ -235,3 +235,35 @@ CI 冒烟测试只能证明导入链/配置，证明不了运行期 JNI 行为�
   避免下游流水线拉到带 bug 的 v1.0.0
 - 产物 `Dex2C-v1.0.0.zip` 已下载核验：守卫已恢复、加载器构造函数为普通
   smali、坏桩零残留、`VERSION=v1.0.0`；CI 冒烟与 zip 校验步骤日志确认执行
+
+---
+
+## 7. v1.0.1 修复记录（2026-10-14，流水线首跑暴露的三处问题）
+
+流水线（apk-protect-action，sigcheck+dex2c 联合勾选）首次实测暴露三个问题
+（`apk-protect-action/docs/build.log` 证据），本版本全部修复，**独立模式行为零变化**：
+
+1. **工程包缺 DynamicRegister.cpp → 消费方链接必炸（致命）**
+   `Dex2C.cpp` 的 `JNI_OnLoad` 无条件调用 `dynamic_register_compile_methods`，
+   但该函数的定义文件只在 `do_compile`（完整构建）分支生成——`--no-build`
+   工程包永远缺件 → `ld.lld: undefined symbol`。
+   修复：真表/空桩生成挪出 `if do_compile:`，两种模式都生成。
+2. **--no-build 不收工 → 白跑完整 APK 重建 + zipalign 假报错（非致命）**
+   归档后缺 `return`，继续跑 APKEditor 重建（约 30 秒，产物是"方法已
+   native 化但 so 未编译"的坏 APK，无人消费）+ zipalign（环境没有则报错）+ 签名。
+   修复：归档后 return，对齐 --no-build 语义。
+3. **JNI_OnLoad 的 `FindClass("amimo/dcc/DccApplication") + exit(1)` 自杀地雷**
+   该检查假设 so 只会被独立模式注入的加载器类唤醒；流水线场景 so 由被抽
+   方法所在类的 loadLibrary 唤醒，App 里没有该类 → 必然 exit(1) 闪退。
+   修复：删除该检查（独立模式下它永真——"醒了问自己有没有醒"，删除无感）。
+4. **附带：tools/zipalign 兜底（Termux 开箱即用）**
+   打入 aarch64 静态 zipalign（源：lzhiyong/android-sdk-tools，AOSP
+   Apache-2.0，833KB，实测支持 `-P 16` 16KB 页对齐）。查找策略：**PATH 优先**；
+   无 PATH 且 CPU=aarch64 才用自带（x86_64 主机不会误执行报"Exec format
+   error"）。独立模式在 Termux 上零配置即可产出 Android 15+ 合规的 16KB
+   对齐包；流水线不受影响（修复 2 后 --no-build 不再调 zipalign）。
+
+**验证**：py_compile / --help 冒烟 / find_zipalign 三态实测（PATH 优先 ✓、
+aarch64 兜底 ✓、真实对齐 + `-P 16` 自动识别 ✓）。
+**待验证**：C++ 侧本机无法编译（Termux 无 ndk-build 条件），由流水线消费方
+首次构建验证——问题 1 的链接修复与问题 3 的运行期行为均需该次构建确认。
