@@ -405,26 +405,36 @@ class Writer(object):
             self.write("(%s) " % (get_native_type(ins.get_value().get_type())))
 
         if invoke_type == 'super':
-            # ⚠️ 2026-11-02 修【无限递归 → StackOverflowError】。
+            # ⚠️ 2026-11-02 修【invoke-super 目标类可能是自身，也可能是真实父类】。
             #
-            # `invoke-super {p0}, LCur;->m()V` 的 dex 语义是「从【父类】开始
-            # 解析 m」，允许目标类写成当前类自身。而原实现直接用
-            #     GetMethodID(FindClass(Cur), "m")
-            # 拿到的就是【Cur 自己重写的 m】→ CallNonvirtual 调 Cur.m
-            # → 又进本函数 → 无限递归。
+            # dex 里 invoke-super 的目标类有两种写法：
+            #   ① 真实父类：Lcom/app/base/BaseActivity;->onCreate(...)V
+            #      → GetMethodID(FindClass(BaseActivity), "onCreate") 就是对的，
+            #        不能再往上取父类，否则会【跳过 BaseActivity.onCreate】。
+            #   ② 当前类自身：Lcom/app/FirstActivity;->onStart()V
+            #      → GetMethodID(FindClass(FirstActivity), "onStart") 拿到的是
+            #        自己重写的版本 → CallNonvirtual 调自身 → 无限递归
+            #        （实测 com.app.lxkd20251026 白屏 + StackOverflowError）。
             #
-            # 实测样本 com.app.lxkd20251026：
-            #   FirstActivity.onStart() 里 invoke-super 指向 FirstActivity 自身
-            #   → java.lang.StackOverflowError: stack size 8188KB
-            #     at FirstActivity.onStart(Native Method) × 30+（真机白屏）
+            # 所以判据是「目标类是否等于当前类」，不能无条件取父类。
             #
-            # 修法：在【父类】上重新解析 mid。GetSuperclass 失败或为空
-            # （Object 的父类是 null）时保留原 mid，行为不变。
-            self.write('{ jclass _sc = env->GetSuperclass(clz);'
-                       ' if (_sc) { jmethodID _sm = env->GetMethodID('
-                       '_sc, "%s", "(%s)%s");'
-                       ' if (_sm) mid = _sm; env->DeleteLocalRef(_sc); } }\n'
-                       % (name, ''.join(ptype), rtype))
+            # ⚠️ 第一版修复的教训：无条件 GetSuperclass 导致 ① 的情况
+            #    跳过了 BaseActivity.onCreate（setContentView 在那里）
+            #    → 界面空白但仍 RESUMED。**修 A 打坏 B，症状是白屏、
+            #    无崩溃、无异常日志，极难归因。**
+            #
+            # 判据用【编译期字符串比较】而非运行期 IsSameObject：
+            #   `jclass &clz = clsN;` 使 clz 就是 clsN，IsSameObject 恒真。
+            #   clsdesc 是 invoke-super 指令里写的目标类描述符，
+            #   self.method.get_class_name() 是当前类 —— 两者相等才是写法 ②。
+            target = get_type(clsdesc)
+            cur = get_type(self.method.get_class_name())
+            if target == cur:
+                self.write('{ jclass _sc = env->GetSuperclass(clz);'
+                           ' if (_sc) { jmethodID _sm = env->GetMethodID('
+                           '_sc, "%s", "(%s)%s");'
+                           ' if (_sm) mid = _sm; env->DeleteLocalRef(_sc); } }\n'
+                           % (name, ''.join(ptype), rtype))
             self.write(
                 'env->CallNonvirtual%sMethodA(v%s, clz, mid, args);\n' % (get_type_descriptor(rtype), self.ra(base)))
         elif invoke_type == 'static':
