@@ -405,6 +405,26 @@ class Writer(object):
             self.write("(%s) " % (get_native_type(ins.get_value().get_type())))
 
         if invoke_type == 'super':
+            # ⚠️ 2026-11-02 修【无限递归 → StackOverflowError】。
+            #
+            # `invoke-super {p0}, LCur;->m()V` 的 dex 语义是「从【父类】开始
+            # 解析 m」，允许目标类写成当前类自身。而原实现直接用
+            #     GetMethodID(FindClass(Cur), "m")
+            # 拿到的就是【Cur 自己重写的 m】→ CallNonvirtual 调 Cur.m
+            # → 又进本函数 → 无限递归。
+            #
+            # 实测样本 com.app.lxkd20251026：
+            #   FirstActivity.onStart() 里 invoke-super 指向 FirstActivity 自身
+            #   → java.lang.StackOverflowError: stack size 8188KB
+            #     at FirstActivity.onStart(Native Method) × 30+（真机白屏）
+            #
+            # 修法：在【父类】上重新解析 mid。GetSuperclass 失败或为空
+            # （Object 的父类是 null）时保留原 mid，行为不变。
+            self.write('{ jclass _sc = env->GetSuperclass(clz);'
+                       ' if (_sc) { jmethodID _sm = env->GetMethodID('
+                       '_sc, "%s", "(%s)%s");'
+                       ' if (_sm) mid = _sm; env->DeleteLocalRef(_sc); } }\n'
+                       % (name, ''.join(ptype), rtype))
             self.write(
                 'env->CallNonvirtual%sMethodA(v%s, clz, mid, args);\n' % (get_type_descriptor(rtype), self.ra(base)))
         elif invoke_type == 'static':
