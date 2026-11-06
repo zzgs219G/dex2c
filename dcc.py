@@ -678,6 +678,34 @@ def compile_dex(apkfile, filtercfg, obfus, dynamic_register, allow_global):
     X_compiled_method_code = {}
     X_errors = []
 
+    # ── 过滤 androguard 解析不了的 dex（2026-11-06）─────────────────
+    # 实测：囧次元包里有一个 classes14.dex，magic 是 `dex\n038`
+    # （140 字节、method=0、空 dex），而 vendored androguard 只认
+    # 035/036/037（其 dvm.py 里写着 `# TODO there is DEX 38 already`）。
+    # 新格式的 class_defs 解析出来是 None，于是
+    #     dex_analysis.add(dex) → vm.get_classes() → AttributeError
+    # 整个构建失败，而这个 dex 一个方法都没有 —— 没必要为它崩。
+    #
+    # ⚠️ 为什么必须先过滤而不能只 try 包住 add()：
+    #   dex_analysis 是全局类索引（第 2 轮 MethodFilter/Dex2C 解析跨 dex
+    #   引用要用它），坏 dex 不能进索引 —— 进了会让后续引用解析拿到脏数据。
+    #
+    # 判据用「get_classes() 能否调通」而不是硬编码 magic 版本：
+    #   将来 androguard 支持 039/040 时自动放宽，不用再改这里。
+    _usable = []
+    for dex in dex_files:
+        try:
+            dex.get_classes()
+        except Exception as e:          # noqa: BLE001
+            print('[WARN    ] dcc: 跳过无法解析的 dex（%s）: %s'
+                  % (type(e).__name__, e))
+            continue
+        _usable.append(dex)
+    if len(_usable) != len(dex_files):
+        print('[WARN    ] dcc: 共 %d 个 dex，跳过 %d 个无法解析的，实际处理 %d 个'
+              % (len(dex_files), len(dex_files) - len(_usable), len(_usable)))
+    dex_files = _usable
+
     for dex in dex_files:
         dex_analysis.add(dex)
 
