@@ -168,7 +168,22 @@ class ApkEditor(object):
     @staticmethod
     def decompile(apk):
         outdir = make_temp_dir("dcc-apkeditor-")
-        check_call(ApkEditor.command("d", "-f", "-t", "raw", "-i", apk, "-o", outdir))
+        # -no-dex-debug：解包时不读调试信息(.line/.local/.param)，回编出的 dex
+        # 自然没有 debug_info。
+        #
+        # 为什么必须加：dex2c 的流程是「解包 → 改 smali → 回编」。原包经过
+        # R8 处理后 debug_info 已被剥掉(实测 1,037 条 / 65KB)，但回编时
+        # smali 里的调试指令被完整写回，debug_info 暴涨到 15,821 条 / 1MB
+        # ——未压缩 +914KB，压缩进 APK 后约 +313KB。
+        # 这份信息对运行时零作用，只在崩溃时用来还原源码行号。Release 包不需要。
+        #
+        # 与 artifact-pipeline 的 lib-repack.sh:39 保持一致：
+        #   java -jar apktool.jar d -r -f --no-debug-info ...
+        # 那边用 apktool 的 --no-debug-info，这边用 ApkEditor 的 -no-dex-debug，
+        # 是同一个语义（报错八：剥离 debug_info，dex 缩小约 1.8MB）。
+        check_call(
+            ApkEditor.command("d", "-f", "-t", "raw", "-no-dex-debug", "-i", apk, "-o", outdir)
+        )
         return outdir
 
     @staticmethod
